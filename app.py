@@ -9,7 +9,7 @@ import tempfile
 import os
 
 # Use environment variable for API key
-genai.configure(api_key=os.getenv("GAIzaSyAbwz9sgamYgkuKLVp-QDl45bT0Bo-Wq64"))
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
 # Rest of your code (embedding_model, functions, etc.) remains the same
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
