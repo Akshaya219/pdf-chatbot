@@ -1,63 +1,65 @@
-import streamlit as st
-import tempfile
+# Standard library imports first
 import os
+import tempfile
 
-# Try importing fitz correctly
+# Third-party imports next
+import streamlit as st
 try:
-    import fitz  # Standard way when PyMuPDF is installed correctly
+    import fitz  # PyMuPDF
 except ImportError:
-    try:
-        from PyMuPDF import fitz  # Alternative import path
-    except ImportError:
-        st.error("Failed to import PyMuPDF. Please check your installation.")
-        st.stop()
+    st.error("PyMuPDF not installed correctly. Please check requirements.txt.")
+    st.stop()
 
-# Import other libraries
 import google.generativeai as genai
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import CharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 
-# Configure API with environment variable (no hardcoded key)
-api_key = os.getenv("GOOGLE_API_KEY")
+# Configure API with environment variable
+api_key = os.getenv("GOOGLE_API_KEY")  # Changed to match standard env var name
 if not api_key:
-    st.error("API key not found. Make sure to set the GOOGLE_API_KEY environment variable.")
+    st.error("API key not found. Set the GOOGLE_API_KEY environment variable in Streamlit Cloud settings.")
     st.stop()
 genai.configure(api_key=api_key)
 
-# Rest of your code remains similar
+# Initialize models
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 embedding_function = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
+# Function to extract text from PDF
 def extract_text_from_pdf(pdf_path):
     doc = fitz.open(pdf_path)
     text = ""
     for page in doc:
         text += page.get_text("text") + "\n"
+    doc.close()  # Good practice to close the file
     return text
 
+# Function to index PDF text
 def index_pdf_text(text):
     text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     texts = text_splitter.split_text(text)
     vector_store = FAISS.from_texts(texts, embedding_function)
     return vector_store
 
+# Function to query Gemini API
 def query_gemini(prompt, context):
     try:
-        # Use a valid model name (gemini-pro is commonly available)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-pro")  # Use a real model name
         response = model.generate_content(f"Context: {context}\nUser Query: {prompt}")
         return response.text
     except Exception as e:
         return f"Error querying Gemini API: {str(e)}"
 
+# Function to search PDF and answer
 def search_pdf_and_answer(query, vector_store):
     docs = vector_store.similarity_search(query, k=3)
     context = "\n".join([doc.page_content for doc in docs])
     answer = query_gemini(query, context)
     return answer
 
+# Streamlit UI
 st.title("📄 PDF Chatbot with Gemini API 🤖")
 uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
 
