@@ -1,0 +1,10 @@
+streamlit
+PyMuPDF
+google-generativeai
+langchain-community
+faiss-cpu
+sentence-transformers
+numpy==2.2.3
+requests==2.32.3
+protobuf==5.29.3
+typing_extensions==4.12.2
