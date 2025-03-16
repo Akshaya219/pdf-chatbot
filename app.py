@@ -1,8 +1,9 @@
-# Standard library imports first
+# app.py
+# Standard library imports
 import os
 import tempfile
 
-# Third-party imports next
+# Third-party imports
 import streamlit as st
 try:
     import fitz  # PyMuPDF
@@ -17,9 +18,9 @@ from langchain.text_splitter import CharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 
 # Configure API with environment variable
-api_key = os.getenv("GOOGLE_API_KEY")  # Changed to match standard env var name
+api_key = os.getenv("GOOGLE_API_KEY")
 if not api_key:
-    st.error("API key not found. Set the GOOGLE_API_KEY environment variable in Streamlit Cloud settings.")
+    st.error("API key not found. Set GOOGLE_API_KEY in Streamlit Cloud secrets.")
     st.stop()
 genai.configure(api_key=api_key)
 
@@ -27,32 +28,29 @@ genai.configure(api_key=api_key)
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 embedding_function = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# Function to extract text from PDF
+# Functions
 def extract_text_from_pdf(pdf_path):
     doc = fitz.open(pdf_path)
     text = ""
     for page in doc:
         text += page.get_text("text") + "\n"
-    doc.close()  # Good practice to close the file
+    doc.close()
     return text
 
-# Function to index PDF text
 def index_pdf_text(text):
     text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     texts = text_splitter.split_text(text)
     vector_store = FAISS.from_texts(texts, embedding_function)
     return vector_store
 
-# Function to query Gemini API
 def query_gemini(prompt, context):
     try:
-        model = genai.GenerativeModel("gemini-pro")  # Use a real model name
+        model = genai.GenerativeModel("gemini-pro")
         response = model.generate_content(f"Context: {context}\nUser Query: {prompt}")
         return response.text
     except Exception as e:
         return f"Error querying Gemini API: {str(e)}"
 
-# Function to search PDF and answer
 def search_pdf_and_answer(query, vector_store):
     docs = vector_store.similarity_search(query, k=3)
     context = "\n".join([doc.page_content for doc in docs])
