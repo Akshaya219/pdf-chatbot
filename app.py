@@ -45,7 +45,7 @@ def index_pdf_text(text):
 
 def query_gemini(prompt, context):
     try:
-        model = genai.GenerativeModel("gemini-pro")
+        model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(f"Context: {context}\nUser Query: {prompt}")
         return response.text
     except Exception as e:
