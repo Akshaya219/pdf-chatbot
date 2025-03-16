@@ -1,17 +1,32 @@
 import streamlit as st
-import fitz  # PyMuPDF
+import tempfile
+import os
+
+# Try importing fitz correctly
+try:
+    import fitz  # Standard way when PyMuPDF is installed correctly
+except ImportError:
+    try:
+        from PyMuPDF import fitz  # Alternative import path
+    except ImportError:
+        st.error("Failed to import PyMuPDF. Please check your installation.")
+        st.stop()
+
+# Import other libraries
 import google.generativeai as genai
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import CharacterTextSplitter
 from sentence_transformers import SentenceTransformer
-import tempfile
-import os
 
-# Use environment variable for API key
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+# Configure API with environment variable (no hardcoded key)
+api_key = os.getenv("GOOGLE_API_KEY")
+if not api_key:
+    st.error("API key not found. Make sure to set the GOOGLE_API_KEY environment variable.")
+    st.stop()
+genai.configure(api_key=api_key)
 
-# Rest of your code (embedding_model, functions, etc.) remains the same
+# Rest of your code remains similar
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 embedding_function = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
@@ -29,9 +44,13 @@ def index_pdf_text(text):
     return vector_store
 
 def query_gemini(prompt, context):
-    model = genai.GenerativeModel("gemini-2.0-flash")  # Check available models
-    response = model.generate_content(f"Context: {context}\nUser Query: {prompt}")
-    return response.text
+    try:
+        # Use a valid model name (gemini-pro is commonly available)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content(f"Context: {context}\nUser Query: {prompt}")
+        return response.text
+    except Exception as e:
+        return f"Error querying Gemini API: {str(e)}"
 
 def search_pdf_and_answer(query, vector_store):
     docs = vector_store.similarity_search(query, k=3)
