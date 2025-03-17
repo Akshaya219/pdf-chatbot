@@ -104,4 +104,4 @@ if uploaded_file:
         if relevant_images:
             st.write("#### Relevant Images:")
             for img_path in relevant_images:
-                st.image(img_path, use_column_width=True)
+                st.image(img_path, use_column_width=True) 
