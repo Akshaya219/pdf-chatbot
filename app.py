@@ -31,7 +31,6 @@ embedding_function = HuggingFaceEmbeddings(model_name="sentence-transformers/all
 
 # Function to extract text and images from PDF
 def extract_text_and_images_from_pdf(pdf_path):
-    st.write("Step 1: Extracting text and images from PDF...")
     doc = fitz.open(pdf_path)
     text_per_page = []
     images_per_page = {}
@@ -48,14 +47,11 @@ def extract_text_and_images_from_pdf(pdf_path):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
                 tmp_img.write(image_bytes)
                 images_per_page[page_num].append(tmp_img.name)
-        st.write(f"  - Page {page_num + 1}: Text extracted, {len(images)} images found.")
     doc.close()
-    st.write("Step 1: Extraction complete.")
     return text_per_page, images_per_page
 
 # Function to index PDF text with page metadata
 def index_pdf_text(text_per_page):
-    st.write("Step 2: Indexing PDF text...")
     documents = []
     for page_num, text in text_per_page:
         text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
@@ -64,27 +60,21 @@ def index_pdf_text(text_per_page):
             doc = Document(page_content=chunk, metadata={'page': page_num})
             documents.append(doc)
     vector_store = FAISS.from_documents(documents, embedding_function)
-    st.write(f"  - Indexed {len(documents)} text chunks.")
-    st.write("Step 2: Indexing complete.")
     return vector_store
 
 # Function to query Gemini API with concise prompt
 def query_gemini(prompt, context):
-    st.write("Step 3: Querying Gemini API...")
     try:
         model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(
             f"Context: {context}\nUser Query: {prompt}\nProvide a short and concise answer suitable for exam preparation."
         )
-        st.write("Step 3: Gemini API query complete.")
         return response.text
     except Exception as e:
-        st.write(f"Error querying Gemini API: {str(e)}")
         return f"Error querying Gemini API: {str(e)}"
 
 # Function to search PDF and answer with images
 def search_pdf_and_answer(query, vector_store, images_per_page):
-    st.write("Step 4: Searching PDF and generating answer...")
     docs = vector_store.similarity_search(query, k=3)
     context = "\n".join([doc.page_content for doc in docs])
     answer = query_gemini(query, context)
@@ -92,7 +82,6 @@ def search_pdf_and_answer(query, vector_store, images_per_page):
     relevant_images = []
     for page_num in page_nums:
         relevant_images.extend(images_per_page.get(page_num, []))
-    st.write("Step 4: Answer generated.")
     return answer, relevant_images
 
 # Streamlit UI
