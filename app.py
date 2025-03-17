@@ -1,7 +1,6 @@
 # app.py
 # Standard library imports
 import os
-import tempfile
 import re
 
 # Third-party imports
@@ -16,7 +15,6 @@ import google.generativeai as genai
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import CharacterTextSplitter
-# Fix for the Document import
 from langchain_core.documents import Document
 from sentence_transformers import SentenceTransformer
 from wordcloud import WordCloud
@@ -38,7 +36,7 @@ def clean_text(text):
     text = re.sub(r'[^a-zA-Z0-9\s]', '', text)  # Remove non-alphanumeric characters
     return text
 
-# Function to extract text and images from PDF
+# Function to extract text and images from PDF (now stores image bytes)
 def extract_text_and_images_from_pdf(pdf_path):
     doc = fitz.open(pdf_path)
     text_per_page = []
@@ -53,9 +51,7 @@ def extract_text_and_images_from_pdf(pdf_path):
             xref = img[0]
             base_image = doc.extract_image(xref)
             image_bytes = base_image["image"]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
-                tmp_img.write(image_bytes)
-                images_per_page[page_num].append(tmp_img.name)
+            images_per_page[page_num].append(image_bytes)  # Store bytes instead of file paths
     doc.close()
     return text_per_page, images_per_page
 
@@ -71,16 +67,29 @@ def index_pdf_text(text_per_page):
     vector_store = FAISS.from_documents(documents, embedding_function)
     return vector_store
 
-# Function to query Gemini API with concise prompt
+# Function to query Gemini API with concise text prompt (using gemini-2.0-pro)
 def query_gemini(prompt, context):
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-2.0-pro")
         response = model.generate_content(
-            f"Context: {context}\nUser Query: {prompt}\nProvide a short and concise answer suitable for exam preparation."
+            f"Context: {context}\nUser Query: {prompt}\nProvide a short and concise text answer suitable for exam preparation."
         )
         return response.text
     except Exception as e:
         return f"Error querying Gemini API: {str(e)}"
+
+# Function to generate an image based on a prompt (using gemini-2.0-pro)
+def generate_image(prompt):
+    try:
+        model = genai.GenerativeModel("gemini-2.0-pro")
+        response = model.generate_content(f"{prompt}\nGenerate an image related to the answer.")
+        for part in response.parts:  # Check response parts for image data
+            if hasattr(part, 'inline_data') and part.inline_data.mime_type.startswith("image/"):
+                return part.inline_data.data  # Return image bytes if found
+        return None  # Return None if no image is generated
+    except Exception as e:
+        print(f"Error generating image: {str(e)}")
+        return None
 
 # Function to search PDF and answer with images and word cloud
 def search_pdf_and_answer(query, vector_store, images_per_page):
@@ -97,29 +106,41 @@ def search_pdf_and_answer(query, vector_store, images_per_page):
     wordcloud = WordCloud().generate(clean_context)
     wordcloud_image = wordcloud.to_image()
 
-    return answer, relevant_images, wordcloud_image
+    # Generate new image based on the answer
+    generated_image_data = generate_image(f"Answer: {answer}")
+
+    return answer, relevant_images, wordcloud_image, generated_image_data
 
 # Streamlit UI
 st.title("📄 PDF Chatbot with Gemini API and Visual Aids 🤖")
 uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
 
 if uploaded_file:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        temp_path = tmp_file.name
-    st.info("Processing PDF... Please wait...")
-    text_per_page, images_per_page = extract_text_and_images_from_pdf(temp_path)
-    vector_store = index_pdf_text(text_per_page)
+    with st.spinner("Processing PDF... Please wait..."):
+        with open("temp.pdf", "wb") as f:
+            f.write(uploaded_file.read())
+        text_per_page, images_per_page = extract_text_and_images_from_pdf("temp.pdf")
+        vector_store = index_pdf_text(text_per_page)
+        os.remove("temp.pdf")  # Clean up temporary file
     st.success("PDF successfully indexed! ✅")
     query = st.text_input("Ask a question from the PDF:")
 
     if query:
-        answer, relevant_images, wordcloud_image = search_pdf_and_answer(query, vector_store, images_per_page)
+        with st.spinner("Generating response..."):
+            answer, relevant_images, wordcloud_image, generated_image_data = search_pdf_and_answer(query, vector_store, images_per_page)
+        
         st.write("### 🤖 Answer")
         st.write(answer)
+        
         if relevant_images:
             st.write("#### Relevant Images from PDF")
-            for img_path in relevant_images:
-                st.image(img_path, use_column_width=True)
+            for img_bytes in relevant_images:
+                st.image(img_bytes, use_column_width=True)
+        
+        if generated_image_data:
+            st.write("#### Generated Image Based on Answer")
+            st.image(generated_image_data, use_column_width=True)
+        
         st.write("#### Word Cloud")
         st.image(wordcloud_image)
+
