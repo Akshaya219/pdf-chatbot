@@ -16,7 +16,8 @@ import google.generativeai as genai
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import CharacterTextSplitter
-from langchain.docstore.Document import Document
+# Fix for the Document import
+from langchain_core.documents import Document
 from sentence_transformers import SentenceTransformer
 from wordcloud import WordCloud
 
