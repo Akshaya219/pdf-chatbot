@@ -15,6 +15,7 @@ import google.generativeai as genai
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import CharacterTextSplitter
+from langchain.docstore.document import Document
 from sentence_transformers import SentenceTransformer
 
 # Configure API with environment variable
@@ -28,34 +29,60 @@ genai.configure(api_key=api_key)
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 embedding_function = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# Functions
-def extract_text_from_pdf(pdf_path):
+# Function to extract text and images from PDF
+def extract_text_and_images_from_pdf(pdf_path):
     doc = fitz.open(pdf_path)
-    text = ""
-    for page in doc:
-        text += page.get_text("text") + "\n"
+    text_per_page = []
+    images_per_page = {}
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        text = page.get_text("text")
+        text_per_page.append((page_num, text))
+        images = page.get_images(full=True)
+        images_per_page[page_num] = []
+        for img in images:
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            image_bytes = base_image["image"]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
+                tmp_img.write(image_bytes)
+                images_per_page[page_num].append(tmp_img.name)
     doc.close()
-    return text
+    return text_per_page, images_per_page
 
-def index_pdf_text(text):
-    text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    texts = text_splitter.split_text(text)
-    vector_store = FAISS.from_texts(texts, embedding_function)
+# Function to index PDF text with page metadata
+def index_pdf_text(text_per_page):
+    documents = []
+    for page_num, text in text_per_page:
+        text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks = text_splitter.split_text(text)
+        for chunk in chunks:
+            doc = Document(page_content=chunk, metadata={'page': page_num})
+            documents.append(doc)
+    vector_store = FAISS.from_documents(documents, embedding_function)
     return vector_store
 
+# Function to query Gemini API with concise prompt
 def query_gemini(prompt, context):
     try:
         model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(f"Context: {context}\nUser Query: {prompt}")
+        response = model.generate_content(
+            f"Context: {context}\nUser Query: {prompt}\nProvide a short and concise answer suitable for exam preparation."
+        )
         return response.text
     except Exception as e:
         return f"Error querying Gemini API: {str(e)}"
 
-def search_pdf_and_answer(query, vector_store):
+# Function to search PDF and answer with images
+def search_pdf_and_answer(query, vector_store, images_per_page):
     docs = vector_store.similarity_search(query, k=3)
     context = "\n".join([doc.page_content for doc in docs])
     answer = query_gemini(query, context)
-    return answer
+    page_nums = set(doc.metadata['page'] for doc in docs)
+    relevant_images = []
+    for page_num in page_nums:
+        relevant_images.extend(images_per_page.get(page_num, []))
+    return answer, relevant_images
 
 # Streamlit UI
 st.title("📄 PDF Chatbot with Gemini API 🤖")
@@ -66,11 +93,15 @@ if uploaded_file:
         tmp_file.write(uploaded_file.read())
         temp_path = tmp_file.name
     st.info("Processing PDF... Please wait...")
-    pdf_text = extract_text_from_pdf(temp_path)
-    vector_store = index_pdf_text(pdf_text)
+    text_per_page, images_per_page = extract_text_and_images_from_pdf(temp_path)
+    vector_store = index_pdf_text(text_per_page)
     st.success("PDF successfully indexed! ✅")
     query = st.text_input("Ask a question from the PDF:")
     if query:
-        answer = search_pdf_and_answer(query, vector_store)
+        answer, relevant_images = search_pdf_and_answer(query, vector_store, images_per_page)
         st.write("### 🤖 Answer:")
         st.write(answer)
+        if relevant_images:
+            st.write("#### Relevant Images:")
+            for img_path in relevant_images:
+                st.image(img_path, use_column_width=True)
