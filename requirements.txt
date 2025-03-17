@@ -6,3 +6,4 @@ langchain-core==0.2.0
 faiss-cpu==1.9.0
 sentence-transformers==3.2.0
 wordcloud==1.9.3
+langchain-core==0.2.0
