@@ -1,7 +1,6 @@
 # app.py
 # Standard library imports
 import os
-import re
 import tempfile
 
 # Third-party imports
@@ -16,9 +15,8 @@ import google.generativeai as genai
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import CharacterTextSplitter
-from langchain_core.documents import Document  # Correct import
+from langchain_core.documents import Document
 from sentence_transformers import SentenceTransformer
-from wordcloud import WordCloud
 
 # Configure API with environment variable
 api_key = os.getenv("GOOGLE_API_KEY")
@@ -30,12 +28,6 @@ genai.configure(api_key=api_key)
 # Initialize models
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 embedding_function = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-# Function to clean text for word cloud
-def clean_text(text):
-    text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces with a single space
-    text = re.sub(r'[^a-zA-Z0-9\s]', '', text)  # Remove non-alphanumeric characters
-    return text
 
 # Function to extract text and images from PDF
 def extract_text_and_images_from_pdf(pdf_path):
@@ -73,7 +65,7 @@ def index_pdf_text(text_per_page):
 # Function to query Gemini API with concise prompt
 def query_gemini(prompt, context):
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")  # Use a valid model
+        model = genai.GenerativeModel("gemini-1.5-flash")  # Valid model as of March 2025
         response = model.generate_content(
             f"Context: {context}\nUser Query: {prompt}\nProvide a short and concise answer suitable for exam preparation."
         )
@@ -81,7 +73,7 @@ def query_gemini(prompt, context):
     except Exception as e:
         return f"Error querying Gemini API: {str(e)}"
 
-# Function to search PDF and answer with images and word cloud
+# Function to search PDF and answer with images
 def search_pdf_and_answer(query, vector_store, images_per_page):
     docs = vector_store.similarity_search(query, k=3)
     context = "\n".join([doc.page_content for doc in docs])
@@ -90,16 +82,10 @@ def search_pdf_and_answer(query, vector_store, images_per_page):
     relevant_images = []
     for page_num in page_nums:
         relevant_images.extend(images_per_page.get(page_num, []))
-
-    # Generate word cloud
-    clean_context = clean_text(context)
-    wordcloud = WordCloud().generate(clean_context)
-    wordcloud_image = wordcloud.to_image()
-
-    return answer, relevant_images, wordcloud_image
+    return answer, relevant_images
 
 # Streamlit UI
-st.title("📄 PDF Chatbot with Gemini API and Visual Aids 🤖")
+st.title("📄 PDF Chatbot with Gemini API 🤖")
 uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
 
 if uploaded_file:
@@ -114,12 +100,10 @@ if uploaded_file:
 
     if query:
         with st.spinner("Generating response..."):
-            answer, relevant_images, wordcloud_image = search_pdf_and_answer(query, vector_store, images_per_page)
+            answer, relevant_images = search_pdf_and_answer(query, vector_store, images_per_page)
         st.write("### 🤖 Answer:")
         st.write(answer)
         if relevant_images:
             st.write("#### Relevant Images from PDF:")
             for img_path in relevant_images:
                 st.image(img_path, use_column_width=True)
-        st.write("#### Word Cloud:")
-        st.image(wordcloud_image)
