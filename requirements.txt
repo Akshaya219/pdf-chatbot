@@ -2,7 +2,8 @@ streamlit
 PyMuPDF
 google-generativeai
 langchain
-faiss-cpu
+langchain_community  # Required for FAISS in LangChain
+faiss-cpu  # Use faiss-gpu if you have a GPU
 sentence-transformers
 transformers
 torch
@@ -10,3 +11,5 @@ Pillow
 python-dotenv
 pdf2image
 pytesseract
+numpy  # Useful for embeddings and array operations
+tiktoken  # Tokenizer (required for LLMs like GPT)
