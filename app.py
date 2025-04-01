@@ -21,7 +21,7 @@ genai.configure(api_key=api_key)
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 embedding_function = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# Function to extract text and images from PDF with better metadata
+# Function to extract text and images from PDF with better metadata and contextual understanding
 def extract_text_and_images_from_pdf(pdf_path):
     doc = fitz.open(pdf_path)
     text_per_page = []
@@ -33,9 +33,21 @@ def extract_text_and_images_from_pdf(pdf_path):
         text = page.get_text("text")
         text_per_page.append((page_num, text))
         
-        # Extract text blocks to associate with images
-        blocks = page.get_text("blocks")
-        text_blocks = [b[4] for b in blocks if b[6] == 0]  # Text blocks only
+        # Get structured text with more detail
+        text_dict = page.get_text("dict")
+        blocks = text_dict.get("blocks", [])
+        
+        # Get text by regions for better context association
+        text_regions = []
+        for block in blocks:
+            if block.get("type") == 0:  # Text block
+                block_text = ""
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        block_text += span.get("text", "")
+                if block_text:
+                    rect = block.get("bbox")
+                    text_regions.append((block_text, rect))
         
         images = page.get_images(full=True)
         images_per_page[page_num] = []
@@ -51,21 +63,33 @@ def extract_text_and_images_from_pdf(pdf_path):
             if (
                 width < 100 or 
                 height < 50 or
-                (width * height) < 10000 or  # Area-based filtering
-                "check your knowledge" in image_name or
+                (width * height) < 12000 or  # Increased area threshold
+                "check" in image_name or
                 "header" in image_name or
                 "footer" in image_name or
-                "logo" in image_name
+                "logo" in image_name or
+                "icon" in image_name or
+                "bullet" in image_name or
+                "button" in image_name
             ):
                 continue  # Skip unwanted images
-
-            # Skip trying to get image rectangle - simplified approach
-            # Just use surrounding text from the page
-            nearby_text = text
             
-            # Extract a subset of the page text if it's too long
-            if len(nearby_text) > 1000:
-                nearby_text = nearby_text[:1000]
+            # For better context, use surrounding paragraphs
+            # We'll use the page text but also remember which page this came from
+            # for later cross-referencing
+            surrounding_text = text
+            
+            # Caption detection: text immediately before or after image
+            caption = ""
+            # Simple heuristic: look for text with terms like "figure", "diagram", "image"
+            caption_indicators = ["figure", "fig", "diagram", "image", "chart", "graph", "table", "illustration"]
+            
+            # Check for captions in nearby text
+            for text_block, _ in text_regions:
+                lower_text = text_block.lower()
+                if any(indicator in lower_text for indicator in caption_indicators):
+                    caption = text_block
+                    break
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
                 tmp_img.write(image_bytes)
@@ -75,10 +99,12 @@ def extract_text_and_images_from_pdf(pdf_path):
                 # Store image metadata for relevance matching
                 image_metadata[img_path] = {
                     'page': page_num,
-                    'nearby_text': nearby_text,
+                    'surrounding_text': surrounding_text,
+                    'caption': caption,
                     'width': width,
                     'height': height,
-                    'area': width * height
+                    'area': width * height,
+                    'aspect_ratio': width / height if height > 0 else 0
                 }
     
     doc.close()
@@ -123,6 +149,80 @@ def compute_similarity(text1, text2):
         st.error(f"Error computing similarity: {str(e)}")
         return 0.0
 
+# Function to rank images by two-step relevance
+def rank_images_by_relevance(query, candidate_images, image_metadata, context_text):
+    if not candidate_images:
+        return []
+    
+    # First pass: compute similarity scores
+    image_scores = []
+    
+    # Also compute similarity between query and overall context
+    query_context_similarity = compute_similarity(query, context_text)
+    
+    for img_path in candidate_images:
+        metadata = image_metadata.get(img_path, {})
+        
+        # Get text associated with this image
+        surrounding_text = metadata.get('surrounding_text', '')
+        caption = metadata.get('caption', '')
+        
+        # Compute multiple similarity scores
+        text_similarity = compute_similarity(query, surrounding_text)
+        caption_similarity = compute_similarity(query, caption) if caption else 0
+        
+        # Area-based score (normalized to 0-0.2 range)
+        area = metadata.get('area', 0)
+        area_factor = min(0.2, area / 500000)
+        
+        # Caption bonus - images with relevant captions are usually more important
+        caption_bonus = 0.15 if caption_similarity > 0.4 else 0
+        
+        # Check if image is likely a diagram/chart based on aspect ratio
+        aspect_ratio = metadata.get('aspect_ratio', 0)
+        is_likely_diagram = 0.7 < aspect_ratio < 1.5  # Many diagrams are roughly square-ish
+        diagram_bonus = 0.1 if is_likely_diagram else 0
+        
+        # Compute final score
+        # Weight caption similarity more highly if present
+        final_score = text_similarity * 0.6 + caption_similarity * 0.3 + area_factor + caption_bonus + diagram_bonus
+        
+        # Additional check: if query-context similarity is high but image similarity is low, 
+        # this might be an irrelevant image on a relevant page
+        if query_context_similarity > 0.6 and text_similarity < 0.3:
+            final_score *= 0.5  # Penalize
+        
+        image_scores.append((img_path, final_score))
+    
+    # Sort by score (descending)
+    image_scores.sort(key=lambda x: x[1], reverse=True)
+    
+    # Apply a higher threshold for acceptance
+    threshold = 0.35  # Increased from previous 0.25
+    relevant_images = [(img, score) for img, score in image_scores if score > threshold]
+    
+    # Second pass: filter out very similar images (avoid duplicates)
+    unique_images = []
+    for i, (img1, score1) in enumerate(relevant_images):
+        is_unique = True
+        for img2, _ in unique_images:
+            metadata1 = image_metadata.get(img1, {})
+            metadata2 = image_metadata.get(img2, {})
+            
+            # If images are from same page and have similar size/position, likely duplicates
+            if (
+                metadata1.get('page') == metadata2.get('page') and
+                abs(metadata1.get('area', 0) - metadata2.get('area', 0)) / max(metadata1.get('area', 1), 1) < 0.2
+            ):
+                is_unique = False
+                break
+        
+        if is_unique:
+            unique_images.append((img1, score1))
+    
+    # Limit to top 2 most relevant images to avoid irrelevant ones
+    return [img for img, _ in unique_images[:2]]
+
 # Improved function to search PDF and answer with relevant images
 def search_pdf_and_answer(query, vector_store, images_per_page, image_metadata):
     # Get relevant document chunks
@@ -140,30 +240,8 @@ def search_pdf_and_answer(query, vector_store, images_per_page, image_metadata):
     if not candidate_images:
         return answer, [], "No relevant images found for this query."
     
-    # Score images based on semantic similarity between query and nearby text
-    image_scores = []
-    for img_path in candidate_images:
-        metadata = image_metadata.get(img_path, {})
-        nearby_text = metadata.get('nearby_text', '')
-        
-        # Compute similarity between query and text near image
-        similarity = compute_similarity(query, nearby_text)
-        
-        # Add bonus for larger images (often more important diagrams/figures)
-        area_factor = min(1.0, metadata.get('area', 0) / 100000) * 0.2
-        
-        final_score = similarity + area_factor
-        image_scores.append((img_path, final_score))
-    
-    # Sort by relevance score and filter by threshold
-    image_scores.sort(key=lambda x: x[1], reverse=True)
-    
-    # Only keep images with good relevance (threshold can be adjusted)
-    threshold = 0.25
-    relevant_images = [img for img, score in image_scores if score > threshold]
-    
-    # Limit to top 3 most relevant images to avoid clutter
-    relevant_images = relevant_images[:3]
+    # Use advanced ranking function
+    relevant_images = rank_images_by_relevance(query, candidate_images, image_metadata, context)
     
     message = ""
     if not relevant_images:
