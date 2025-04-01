@@ -59,31 +59,13 @@ def extract_text_and_images_from_pdf(pdf_path):
             ):
                 continue  # Skip unwanted images
 
-            # Get image rectangle on page
-            img_rect = None
-            for img_info in page.get_images(full=True):
-                if img_info[0] == xref:
-                    for obj in page.get_image_info():
-                        if obj["xref"] == xref:
-                            img_rect = obj["bbox"]
-                            break
-                    break
+            # Skip trying to get image rectangle - simplified approach
+            # Just use surrounding text from the page
+            nearby_text = text
             
-            # Find closest text to the image for better context
-            nearby_text = ""
-            if img_rect:
-                # Get text within 100 points of the image boundaries
-                expanded_rect = (
-                    img_rect[0] - 100, 
-                    img_rect[1] - 100,
-                    img_rect[2] + 100, 
-                    img_rect[3] + 100
-                )
-                nearby_text = page.get_text("text", clip=expanded_rect)
-            
-            # If no nearby text, use the whole page text
-            if not nearby_text and text_blocks:
-                nearby_text = text
+            # Extract a subset of the page text if it's too long
+            if len(nearby_text) > 1000:
+                nearby_text = nearby_text[:1000]
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
                 tmp_img.write(image_bytes)
@@ -129,13 +111,17 @@ def compute_similarity(text1, text2):
     if not text1 or not text2:
         return 0
     
-    # Generate embeddings
-    emb1 = embedding_model.encode([text1])[0]
-    emb2 = embedding_model.encode([text2])[0]
-    
-    # Compute cosine similarity
-    similarity = np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
-    return similarity
+    try:
+        # Generate embeddings
+        emb1 = embedding_model.encode([text1])[0]
+        emb2 = embedding_model.encode([text2])[0]
+        
+        # Compute cosine similarity
+        similarity = np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
+        return float(similarity)  # Ensure it's a Python float
+    except Exception as e:
+        st.error(f"Error computing similarity: {str(e)}")
+        return 0.0
 
 # Improved function to search PDF and answer with relevant images
 def search_pdf_and_answer(query, vector_store, images_per_page, image_metadata):
