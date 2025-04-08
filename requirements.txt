@@ -1,8 +1,5 @@
-streamlit 
-pymupdf 
-google-generativeai 
-langchain 
-langchain-community 
-sentence-transformers 
-numpy 
-faiss-cpu
+streamlit
+pymupdf
+google-generativeai
+langchain
+numpy
