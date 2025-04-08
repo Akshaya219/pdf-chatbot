@@ -3,8 +3,11 @@ import tempfile
 import streamlit as st
 import fitz  # PyMuPDF
 import google.generativeai as genai
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_core.documents import Document
+from sentence_transformers import SentenceTransformer
 import numpy as np
 
 # Configure API with environment variable
@@ -14,49 +17,9 @@ if not api_key:
     st.stop()
 genai.configure(api_key=api_key)
 
-# Define a simple embedding function using Gemini API
-# This avoids dependency on SentenceTransformer which might be causing issues
-def get_embeddings(text_list):
-    try:
-        model = genai.GenerativeModel("embedding-001")
-        embeddings = []
-        for text in text_list:
-            if not text.strip():
-                # Handle empty strings with a zero vector
-                embeddings.append(np.zeros(768))
-                continue
-            
-            # Get embeddings from Gemini API
-            result = model.embed_content(text)
-            embeddings.append(np.array(result.embedding))
-        return embeddings
-    except Exception as e:
-        st.error(f"Error generating embeddings: {str(e)}")
-        return [np.zeros(768) for _ in text_list]  # Fallback
-
-# Simplified vector store using numpy instead of FAISS
-class SimpleVectorStore:
-    def __init__(self, documents, embeddings):
-        self.documents = documents
-        self.embeddings = embeddings
-    
-    def similarity_search(self, query, k=3):
-        query_embedding = get_embeddings([query])[0]
-        
-        # Calculate cosine similarity
-        similarities = []
-        for i, doc_embedding in enumerate(self.embeddings):
-            # Cosine similarity
-            similarity = np.dot(query_embedding, doc_embedding) / (
-                np.linalg.norm(query_embedding) * np.linalg.norm(doc_embedding)
-            ) if np.linalg.norm(doc_embedding) > 0 else 0
-            similarities.append((i, similarity))
-        
-        # Sort by similarity (descending)
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        
-        # Return top k documents
-        return [self.documents[i] for i, _ in similarities[:k]]
+# Initialize models - Use only sentence-transformers for embeddings
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+embedding_function = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 # Function to extract text and images from PDF with better metadata and contextual understanding
 def extract_text_and_images_from_pdf(pdf_path):
@@ -154,12 +117,7 @@ def index_pdf_text(text_per_page):
         for chunk in chunks:
             doc = Document(page_content=chunk, metadata={'page': page_num})
             documents.append(doc)
-    
-    # Generate embeddings for all documents
-    embeddings = get_embeddings([doc.page_content for doc in documents])
-    
-    # Create our simplified vector store
-    return SimpleVectorStore(documents, embeddings)
+    return FAISS.from_documents(documents, embedding_function)
 
 # Function to query Gemini API with concise prompt
 def query_gemini(prompt, context):
@@ -172,19 +130,19 @@ def query_gemini(prompt, context):
     except Exception as e:
         return f"Error querying Gemini API: {str(e)}"
 
-# Compute similarity between two texts
+# Function to compute semantic similarity between query and text using sentence-transformers
 def compute_similarity(text1, text2):
     if not text1 or not text2:
         return 0
     
     try:
-        # Generate embeddings
-        emb1 = get_embeddings([text1])[0]
-        emb2 = get_embeddings([text2])[0]
+        # Generate embeddings using sentence-transformers directly
+        emb1 = embedding_model.encode([text1])[0]
+        emb2 = embedding_model.encode([text2])[0]
         
         # Compute cosine similarity
         similarity = np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
-        return float(similarity)
+        return float(similarity)  # Ensure it's a Python float
     except Exception as e:
         st.error(f"Error computing similarity: {str(e)}")
         return 0.0
@@ -220,26 +178,28 @@ def rank_images_by_relevance(query, candidate_images, image_metadata, context_te
         
         # Check if image is likely a diagram/chart based on aspect ratio
         aspect_ratio = metadata.get('aspect_ratio', 0)
-        is_likely_diagram = 0.7 < aspect_ratio < 1.5
+        is_likely_diagram = 0.7 < aspect_ratio < 1.5  # Many diagrams are roughly square-ish
         diagram_bonus = 0.1 if is_likely_diagram else 0
         
         # Compute final score
+        # Weight caption similarity more highly if present
         final_score = text_similarity * 0.6 + caption_similarity * 0.3 + area_factor + caption_bonus + diagram_bonus
         
-        # Additional check
+        # Additional check: if query-context similarity is high but image similarity is low, 
+        # this might be an irrelevant image on a relevant page
         if query_context_similarity > 0.6 and text_similarity < 0.3:
-            final_score *= 0.5
+            final_score *= 0.5  # Penalize
         
         image_scores.append((img_path, final_score))
     
     # Sort by score (descending)
     image_scores.sort(key=lambda x: x[1], reverse=True)
     
-    # Apply threshold
-    threshold = 0.35
+    # Apply a higher threshold for acceptance
+    threshold = 0.35  # Increased from previous 0.25
     relevant_images = [(img, score) for img, score in image_scores if score > threshold]
     
-    # Filter out similar images
+    # Second pass: filter out very similar images (avoid duplicates)
     unique_images = []
     for i, (img1, score1) in enumerate(relevant_images):
         is_unique = True
@@ -247,6 +207,7 @@ def rank_images_by_relevance(query, candidate_images, image_metadata, context_te
             metadata1 = image_metadata.get(img1, {})
             metadata2 = image_metadata.get(img2, {})
             
+            # If images are from same page and have similar size/position, likely duplicates
             if (
                 metadata1.get('page') == metadata2.get('page') and
                 abs(metadata1.get('area', 0) - metadata2.get('area', 0)) / max(metadata1.get('area', 1), 1) < 0.2
@@ -257,9 +218,10 @@ def rank_images_by_relevance(query, candidate_images, image_metadata, context_te
         if is_unique:
             unique_images.append((img1, score1))
     
+    # Limit to top 2 most relevant images to avoid irrelevant ones
     return [img for img, _ in unique_images[:2]]
 
-# Function to search PDF and answer with relevant images
+# Improved function to search PDF and answer with relevant images
 def search_pdf_and_answer(query, vector_store, images_per_page, image_metadata):
     # Get relevant document chunks
     docs = vector_store.similarity_search(query, k=3)
@@ -285,83 +247,15 @@ def search_pdf_and_answer(query, vector_store, images_per_page, image_metadata):
     
     return answer, relevant_images, message
 
-# JavaScript for voice recognition
-def get_speech_recognition_js():
-    return """
-    <script>
-    const micButton = document.getElementById('mic-button');
-    let recognition;
-    let isListening = false;
+# JavaScript for voice recognition - will be injected via st.components.html
+def voice_recognition_component():
+    speech_recognition_html = """
+    <div class="mic-container">
+        <button id="mic-button" type="button">🎙️</button>
+        <span id="mic-status">🎙️ Click to speak</span>
+    </div>
+    <div id="query-status"></div>
     
-    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-        recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-        recognition.continuous = false;
-        recognition.interimResults = true;
-        recognition.lang = 'en-US';
-        
-        recognition.onstart = function() {
-            document.getElementById('mic-status').textContent = '🎙️ Listening...';
-            document.getElementById('mic-button').classList.add('listening');
-        };
-        
-        recognition.onresult = function(event) {
-            const transcript = Array.from(event.results)
-                .map(result => result[0])
-                .map(result => result.transcript)
-                .join('');
-                
-            if (event.results[0].isFinal) {
-                document.getElementById('query-input').value = transcript;
-                document.getElementById('query-status').textContent = 'Query: ' + transcript;
-                stopListening();
-                // Submit the form after a short delay to allow the user to see the transcript
-                setTimeout(() => {
-                    document.getElementById('query-form').dispatchEvent(new Event('submit', { 'bubbles': true }));
-                }, 1000);
-            }
-        };
-        
-        recognition.onerror = function(event) {
-            console.error('Speech recognition error', event.error);
-            document.getElementById('mic-status').textContent = '⚠️ Error: ' + event.error;
-            stopListening();
-        };
-        
-        recognition.onend = function() {
-            stopListening();
-        };
-    }
-    
-    function toggleListening() {
-        if (!recognition) {
-            document.getElementById('mic-status').textContent = '❌ Speech recognition not supported';
-            return;
-        }
-        
-        if (isListening) {
-            stopListening();
-        } else {
-            isListening = true;
-            recognition.start();
-        }
-    }
-    
-    function stopListening() {
-        if (isListening) {
-            isListening = false;
-            recognition.stop();
-            document.getElementById('mic-status').textContent = '🎙️ Click to speak';
-            document.getElementById('mic-button').classList.remove('listening');
-        }
-    }
-    
-    document.getElementById('mic-button').addEventListener('click', toggleListening);
-    </script>
-    """
-
-# CSS for the microphone button and status
-def get_css():
-    return """
     <style>
     .mic-container {
         display: flex;
@@ -413,27 +307,94 @@ def get_css():
         }
     }
     </style>
+    
+    <script>
+    const micButton = document.getElementById('mic-button');
+    let recognition;
+    let isListening = false;
+    
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+        recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+        recognition.continuous = false;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+        
+        recognition.onstart = function() {
+            document.getElementById('mic-status').textContent = '🎙️ Listening...';
+            document.getElementById('mic-button').classList.add('listening');
+        };
+        
+        recognition.onresult = function(event) {
+            const transcript = Array.from(event.results)
+                .map(result => result[0])
+                .map(result => result.transcript)
+                .join('');
+                
+            if (event.results[0].isFinal) {
+                document.getElementById('query-status').textContent = 'Query: ' + transcript;
+                
+                // Send the transcript to Streamlit via session state
+                window.parent.postMessage({
+                    type: 'streamlit:setComponentValue',
+                    value: transcript
+                }, '*');
+                
+                stopListening();
+            }
+        };
+        
+        recognition.onerror = function(event) {
+            console.error('Speech recognition error', event.error);
+            document.getElementById('mic-status').textContent = '⚠️ Error: ' + event.error;
+            stopListening();
+        };
+        
+        recognition.onend = function() {
+            stopListening();
+        };
+    }
+    
+    function toggleListening() {
+        if (!recognition) {
+            document.getElementById('mic-status').textContent = '❌ Speech recognition not supported';
+            return;
+        }
+        
+        if (isListening) {
+            stopListening();
+        } else {
+            isListening = true;
+            recognition.start();
+        }
+    }
+    
+    function stopListening() {
+        if (isListening) {
+            isListening = false;
+            recognition.stop();
+            document.getElementById('mic-status').textContent = '🎙️ Click to speak';
+            document.getElementById('mic-button').classList.remove('listening');
+        }
+    }
+    
+    document.getElementById('mic-button').addEventListener('click', toggleListening);
+    </script>
     """
-
-# HTML for the microphone button
-def get_mic_button_html():
-    return """
-    <div class="mic-container">
-        <button id="mic-button" type="button">🎙️</button>
-        <span id="mic-status">🎙️ Click to speak</span>
-    </div>
-    <div id="query-status"></div>
-    """
+    
+    # Use Streamlit components.html to inject the HTML with JavaScript
+    st.components.v1.html(speech_recognition_html, height=100)
 
 # Streamlit UI
 st.set_page_config(page_title="PDF Chatbot with Voice", layout="wide")
 st.title("📄 PDF Chatbot with Voice & Gemini API 🤖")
 
+# Initialize session state
 if "pdf_processed" not in st.session_state:
     st.session_state.pdf_processed = False
     st.session_state.vector_store = None
     st.session_state.images_per_page = None
     st.session_state.image_metadata = None
+    st.session_state.voice_input = ""
 
 uploaded_file = st.file_uploader("Upload a PDF file", type="pdf", key="pdf_uploader")
 
@@ -451,41 +412,48 @@ if uploaded_file and not st.session_state.pdf_processed:
         st.session_state.pdf_processed = True
     st.success("PDF successfully indexed! ✅")
 
-# Add CSS and HTML components for voice recognition
-st.markdown(get_css(), unsafe_allow_html=True)
+# Voice recognition component (only show when PDF is processed)
+if st.session_state.pdf_processed:
+    st.write("### Voice Input")
+    # Add the voice recognition component
+    voice_recognition_component()
+    
+    # Create a form for the query
+    with st.form(key="query_form"):
+        # Text input that can be filled by voice or manually
+        query = st.text_input("Ask a question from the PDF:", key="query-input")
+        
+        # Submit button
+        submit_button = st.form_submit_button("Ask")
 
-# Create a form to properly handle the submission
-with st.form(key="query_form", id="query-form"):
-    # Add the microphone button
-    st.markdown(get_mic_button_html(), unsafe_allow_html=True)
-    
-    # Add the query input field
-    query = st.text_input("Ask a question from the PDF:", key="query-input", id="query-input")
-    
-    # Add the submit button
-    submit_button = st.form_submit_button("Ask")
+    # Handle voice input via callback
+    if st.session_state.get('voice_input'):
+        # Transfer voice input to the text field
+        query = st.session_state.voice_input
+        st.session_state.voice_input = ""  # Clear it after use
+        
+        # Rerun to process the query
+        st.experimental_rerun()
 
-# Add the JavaScript after the form
-st.markdown(get_speech_recognition_js(), unsafe_allow_html=True)
-
-if submit_button and query and st.session_state.pdf_processed:
-    with st.spinner("Generating response..."):
-        answer, relevant_images, message = search_pdf_and_answer(
-            query, 
-            st.session_state.vector_store, 
-            st.session_state.images_per_page,
-            st.session_state.image_metadata
-        )
-    
-    st.write("### 🤖 Answer:")
-    st.write(answer)
-    
-    if relevant_images:
-        st.write("#### Relevant Images from PDF:")
-        for img_path in relevant_images:
-            st.image(img_path, use_column_width=True)
-    elif message:
-        st.info(message)
+    # Process query if submitted
+    if submit_button and query and st.session_state.pdf_processed:
+        with st.spinner("Generating response..."):
+            answer, relevant_images, message = search_pdf_and_answer(
+                query, 
+                st.session_state.vector_store, 
+                st.session_state.images_per_page,
+                st.session_state.image_metadata
+            )
+        
+        st.write("### 🤖 Answer:")
+        st.write(answer)
+        
+        if relevant_images:
+            st.write("#### Relevant Images from PDF:")
+            for img_path in relevant_images:
+                st.image(img_path, use_column_width=True)
+        elif message:
+            st.info(message)
 
 # Add instructions for using voice recognition
 if st.session_state.pdf_processed:
@@ -494,8 +462,9 @@ if st.session_state.pdf_processed:
     ### How to use voice input:
     1. Click the microphone button 🎙️
     2. Speak your question clearly
-    3. The system will automatically submit your question after you finish speaking
-    4. If there's an error, try again or type your question manually
+    3. The system will capture your speech and add it to the input field
+    4. Click "Ask" to submit your question 
+    5. If there's an error, try again or type your question manually
     
     **Note:** Voice recognition requires a microphone and works best in Chrome browsers.
     """)
