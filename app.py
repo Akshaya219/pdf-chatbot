@@ -9,6 +9,7 @@ from langchain.text_splitter import CharacterTextSplitter
 from langchain_core.documents import Document
 from sentence_transformers import SentenceTransformer
 import numpy as np
+import base64
 
 # Configure API with environment variable
 api_key = os.getenv("GOOGLE_API_KEY")
@@ -249,8 +250,149 @@ def search_pdf_and_answer(query, vector_store, images_per_page, image_metadata):
     
     return answer, relevant_images, message
 
+# JavaScript for voice recognition
+def get_speech_recognition_js():
+    return """
+    <script>
+    const micButton = document.getElementById('mic-button');
+    let recognition;
+    let isListening = false;
+    
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+        recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+        recognition.continuous = false;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+        
+        recognition.onstart = function() {
+            document.getElementById('mic-status').textContent = '🎙️ Listening...';
+            document.getElementById('mic-button').classList.add('listening');
+        };
+        
+        recognition.onresult = function(event) {
+            const transcript = Array.from(event.results)
+                .map(result => result[0])
+                .map(result => result.transcript)
+                .join('');
+                
+            if (event.results[0].isFinal) {
+                document.getElementById('query-input').value = transcript;
+                document.getElementById('query-status').textContent = 'Query: ' + transcript;
+                stopListening();
+                // Submit the form after a short delay to allow the user to see the transcript
+                setTimeout(() => {
+                    document.getElementById('query-form').dispatchEvent(new Event('submit', { 'bubbles': true }));
+                }, 1000);
+            }
+        };
+        
+        recognition.onerror = function(event) {
+            console.error('Speech recognition error', event.error);
+            document.getElementById('mic-status').textContent = '⚠️ Error: ' + event.error;
+            stopListening();
+        };
+        
+        recognition.onend = function() {
+            stopListening();
+        };
+    }
+    
+    function toggleListening() {
+        if (!recognition) {
+            document.getElementById('mic-status').textContent = '❌ Speech recognition not supported';
+            return;
+        }
+        
+        if (isListening) {
+            stopListening();
+        } else {
+            isListening = true;
+            recognition.start();
+        }
+    }
+    
+    function stopListening() {
+        if (isListening) {
+            isListening = false;
+            recognition.stop();
+            document.getElementById('mic-status').textContent = '🎙️ Click to speak';
+            document.getElementById('mic-button').classList.remove('listening');
+        }
+    }
+    
+    document.getElementById('mic-button').addEventListener('click', toggleListening);
+    </script>
+    """
+
+# CSS for the microphone button and status
+def get_css():
+    return """
+    <style>
+    .mic-container {
+        display: flex;
+        align-items: center;
+        margin-bottom: 15px;
+    }
+    #mic-button {
+        background-color: #f0f2f6;
+        border: none;
+        border-radius: 50%;
+        width: 48px;
+        height: 48px;
+        font-size: 20px;
+        cursor: pointer;
+        transition: all 0.3s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        margin-right: 10px;
+    }
+    #mic-button:hover {
+        background-color: #e6e9ef;
+    }
+    #mic-button.listening {
+        background-color: #ff4b4b;
+        animation: pulse 1.5s infinite;
+    }
+    #mic-status {
+        font-size: 14px;
+        color: #555;
+        margin-left: 10px;
+    }
+    #query-status {
+        font-size: 14px;
+        color: #555;
+        margin-top: 5px;
+        font-style: italic;
+    }
+    @keyframes pulse {
+        0% {
+            transform: scale(1);
+        }
+        50% {
+            transform: scale(1.05);
+        }
+        100% {
+            transform: scale(1);
+        }
+    }
+    </style>
+    """
+
+# HTML for the microphone button
+def get_mic_button_html():
+    return """
+    <div class="mic-container">
+        <button id="mic-button" type="button">🎙️</button>
+        <span id="mic-status">🎙️ Click to speak</span>
+    </div>
+    <div id="query-status"></div>
+    """
+
 # Streamlit UI
-st.title("📄 PDF Chatbot with Gemini API 🤖")
+st.set_page_config(page_title="PDF Chatbot with Voice", layout="wide")
+st.title("📄 PDF Chatbot with Voice & Gemini API 🤖")
 
 if "pdf_processed" not in st.session_state:
     st.session_state.pdf_processed = False
@@ -274,9 +416,24 @@ if uploaded_file and not st.session_state.pdf_processed:
         st.session_state.pdf_processed = True
     st.success("PDF successfully indexed! ✅")
 
-query = st.text_input("Ask a question from the PDF:")
+# Add CSS and HTML components for voice recognition
+st.markdown(get_css(), unsafe_allow_html=True)
 
-if query and st.session_state.pdf_processed:
+# Create a form to properly handle the submission
+with st.form(key="query_form", id="query-form"):
+    # Add the microphone button
+    st.markdown(get_mic_button_html(), unsafe_allow_html=True)
+    
+    # Add the query input field
+    query = st.text_input("Ask a question from the PDF:", key="query-input", id="query-input")
+    
+    # Add the submit button
+    submit_button = st.form_submit_button("Ask")
+
+# Add the JavaScript after the form
+st.markdown(get_speech_recognition_js(), unsafe_allow_html=True)
+
+if submit_button and query and st.session_state.pdf_processed:
     with st.spinner("Generating response..."):
         answer, relevant_images, message = search_pdf_and_answer(
             query, 
@@ -294,3 +451,16 @@ if query and st.session_state.pdf_processed:
             st.image(img_path, use_column_width=True)
     elif message:
         st.info(message)
+
+# Add instructions for using voice recognition
+if st.session_state.pdf_processed:
+    st.sidebar.title("Voice Recognition Instructions")
+    st.sidebar.write("""
+    ### How to use voice input:
+    1. Click the microphone button 🎙️
+    2. Speak your question clearly
+    3. The system will automatically submit your question after you finish speaking
+    4. If there's an error, try again or type your question manually
+    
+    **Note:** Voice recognition requires a microphone and works best in Chrome browsers.
+    """)
