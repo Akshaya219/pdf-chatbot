@@ -3,13 +3,9 @@ import tempfile
 import streamlit as st
 import fitz  # PyMuPDF
 import google.generativeai as genai
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_core.documents import Document
-from sentence_transformers import SentenceTransformer
 import numpy as np
-import base64
 
 # Configure API with environment variable
 api_key = os.getenv("GOOGLE_API_KEY")
@@ -18,9 +14,49 @@ if not api_key:
     st.stop()
 genai.configure(api_key=api_key)
 
-# Initialize models
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-embedding_function = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+# Define a simple embedding function using Gemini API
+# This avoids dependency on SentenceTransformer which might be causing issues
+def get_embeddings(text_list):
+    try:
+        model = genai.GenerativeModel("embedding-001")
+        embeddings = []
+        for text in text_list:
+            if not text.strip():
+                # Handle empty strings with a zero vector
+                embeddings.append(np.zeros(768))
+                continue
+            
+            # Get embeddings from Gemini API
+            result = model.embed_content(text)
+            embeddings.append(np.array(result.embedding))
+        return embeddings
+    except Exception as e:
+        st.error(f"Error generating embeddings: {str(e)}")
+        return [np.zeros(768) for _ in text_list]  # Fallback
+
+# Simplified vector store using numpy instead of FAISS
+class SimpleVectorStore:
+    def __init__(self, documents, embeddings):
+        self.documents = documents
+        self.embeddings = embeddings
+    
+    def similarity_search(self, query, k=3):
+        query_embedding = get_embeddings([query])[0]
+        
+        # Calculate cosine similarity
+        similarities = []
+        for i, doc_embedding in enumerate(self.embeddings):
+            # Cosine similarity
+            similarity = np.dot(query_embedding, doc_embedding) / (
+                np.linalg.norm(query_embedding) * np.linalg.norm(doc_embedding)
+            ) if np.linalg.norm(doc_embedding) > 0 else 0
+            similarities.append((i, similarity))
+        
+        # Sort by similarity (descending)
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        
+        # Return top k documents
+        return [self.documents[i] for i, _ in similarities[:k]]
 
 # Function to extract text and images from PDF with better metadata and contextual understanding
 def extract_text_and_images_from_pdf(pdf_path):
@@ -76,8 +112,6 @@ def extract_text_and_images_from_pdf(pdf_path):
                 continue  # Skip unwanted images
             
             # For better context, use surrounding paragraphs
-            # We'll use the page text but also remember which page this came from
-            # for later cross-referencing
             surrounding_text = text
             
             # Caption detection: text immediately before or after image
@@ -120,7 +154,12 @@ def index_pdf_text(text_per_page):
         for chunk in chunks:
             doc = Document(page_content=chunk, metadata={'page': page_num})
             documents.append(doc)
-    return FAISS.from_documents(documents, embedding_function)
+    
+    # Generate embeddings for all documents
+    embeddings = get_embeddings([doc.page_content for doc in documents])
+    
+    # Create our simplified vector store
+    return SimpleVectorStore(documents, embeddings)
 
 # Function to query Gemini API with concise prompt
 def query_gemini(prompt, context):
@@ -133,19 +172,19 @@ def query_gemini(prompt, context):
     except Exception as e:
         return f"Error querying Gemini API: {str(e)}"
 
-# Function to compute semantic similarity between query and text
+# Compute similarity between two texts
 def compute_similarity(text1, text2):
     if not text1 or not text2:
         return 0
     
     try:
         # Generate embeddings
-        emb1 = embedding_model.encode([text1])[0]
-        emb2 = embedding_model.encode([text2])[0]
+        emb1 = get_embeddings([text1])[0]
+        emb2 = get_embeddings([text2])[0]
         
         # Compute cosine similarity
         similarity = np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
-        return float(similarity)  # Ensure it's a Python float
+        return float(similarity)
     except Exception as e:
         st.error(f"Error computing similarity: {str(e)}")
         return 0.0
@@ -181,28 +220,26 @@ def rank_images_by_relevance(query, candidate_images, image_metadata, context_te
         
         # Check if image is likely a diagram/chart based on aspect ratio
         aspect_ratio = metadata.get('aspect_ratio', 0)
-        is_likely_diagram = 0.7 < aspect_ratio < 1.5  # Many diagrams are roughly square-ish
+        is_likely_diagram = 0.7 < aspect_ratio < 1.5
         diagram_bonus = 0.1 if is_likely_diagram else 0
         
         # Compute final score
-        # Weight caption similarity more highly if present
         final_score = text_similarity * 0.6 + caption_similarity * 0.3 + area_factor + caption_bonus + diagram_bonus
         
-        # Additional check: if query-context similarity is high but image similarity is low, 
-        # this might be an irrelevant image on a relevant page
+        # Additional check
         if query_context_similarity > 0.6 and text_similarity < 0.3:
-            final_score *= 0.5  # Penalize
+            final_score *= 0.5
         
         image_scores.append((img_path, final_score))
     
     # Sort by score (descending)
     image_scores.sort(key=lambda x: x[1], reverse=True)
     
-    # Apply a higher threshold for acceptance
-    threshold = 0.35  # Increased from previous 0.25
+    # Apply threshold
+    threshold = 0.35
     relevant_images = [(img, score) for img, score in image_scores if score > threshold]
     
-    # Second pass: filter out very similar images (avoid duplicates)
+    # Filter out similar images
     unique_images = []
     for i, (img1, score1) in enumerate(relevant_images):
         is_unique = True
@@ -210,7 +247,6 @@ def rank_images_by_relevance(query, candidate_images, image_metadata, context_te
             metadata1 = image_metadata.get(img1, {})
             metadata2 = image_metadata.get(img2, {})
             
-            # If images are from same page and have similar size/position, likely duplicates
             if (
                 metadata1.get('page') == metadata2.get('page') and
                 abs(metadata1.get('area', 0) - metadata2.get('area', 0)) / max(metadata1.get('area', 1), 1) < 0.2
@@ -221,10 +257,9 @@ def rank_images_by_relevance(query, candidate_images, image_metadata, context_te
         if is_unique:
             unique_images.append((img1, score1))
     
-    # Limit to top 2 most relevant images to avoid irrelevant ones
     return [img for img, _ in unique_images[:2]]
 
-# Improved function to search PDF and answer with relevant images
+# Function to search PDF and answer with relevant images
 def search_pdf_and_answer(query, vector_store, images_per_page, image_metadata):
     # Get relevant document chunks
     docs = vector_store.similarity_search(query, k=3)
